@@ -1,0 +1,8 @@
+/opt/source/llvm-passes/MyPass/build/CMakeFiles/intrinsics_gen.dir
+/opt/source/llvm-passes/MyPass/build/CMakeFiles/vt_gen.dir
+/opt/source/llvm-passes/MyPass/build/CMakeFiles/omp_gen.dir
+/opt/source/llvm-passes/MyPass/build/CMakeFiles/acc_gen.dir
+/opt/source/llvm-passes/MyPass/build/CMakeFiles/target_parser_gen.dir
+/opt/source/llvm-passes/MyPass/build/CMakeFiles/MyPass.dir
+/opt/source/llvm-passes/MyPass/build/CMakeFiles/edit_cache.dir
+/opt/source/llvm-passes/MyPass/build/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,234 @@
+// MathObfuscator.cpp
+#include "llvm/Passes/PassPlugin.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/Support/raw_ostream.h"
+#include <random>
+
+using namespace llvm;
+
+enum class OpType { Add, Sub, Mul, Div };
+
+struct MathOp {
+  Value* A;
+  Value* B;
+  OpType Type;
+};
+
+std::vector<MathOp> findMathOps(Function &F);
+Value* obfuscateMathOp(IRBuilder<>& B, MathOp op);
+
+Value* handleDissimilarOperand(IRBuilder<>& B, BinaryOperator *Op, Value *A, Value *B) {
+  int choice = dist(rng);
+  Type* Ty = A->getType();
+
+  switch (Op->getOpcode()) {
+    case Instruction::Add:
+      switch (choice) {
+        case 0: errs() << "a + b → a - (-b)\n";
+                return B.CreateSub(A, B.CreateNeg(B));
+        case 1: errs() << "a + b → (a ^ b) ^ (a ^ b)\n";
+                return B.CreateXor(B.CreateXor(A, B), B.CreateXor(A, B));
+      }
+      break;
+
+    case Instruction::Sub:
+      if (choice == 0) {
+        errs() << "a - b → a + (~b + 1)\n";
+        return B.CreateAdd(A, B.CreateAdd(B.CreateNot(B), ConstantInt::get(Ty, 1)));
+      }
+      break;
+
+    case Instruction::Mul:
+      // Only if one is power-of-2
+      if (isPowerOf2(B)) {
+        errs() << "a * 8 → a << 3\n";
+        return B.CreateShl(A, ConstantInt::get(Ty, log2(B)));
+      }
+      break;
+  }
+  return nullptr;
+}
+
+struct MathObfuscator : PassInfoMixin<MathObfuscator> {
+  std::mt19937 rng;
+  std::uniform_int_distribution<int> dist;
+
+  MathObfuscator() : dist(0, 2) {
+    std::random_device rd;
+    rng.seed(rd());
+  }
+
+  // x + x
+  Value* createEquivalentAdd(IRBuilder<>& Builder, Value* X) {
+    int choice = dist(rng);
+    Type* Ty = X->getType();
+
+    switch (choice) {
+      case 0: {
+        errs() << "x + x → x * 2\n";
+        return Builder.CreateMul(X, ConstantInt::get(Ty, 2));
+      }
+      case 1: {
+        errs() << "x + x → x << 1\n";
+        return Builder.CreateShl(X, ConstantInt::get(Ty, 1));
+      }
+      case 2: {
+        errs() << "x + x → (x * 3) - x\n";
+        Value* X3 = Builder.CreateMul(X, ConstantInt::get(Ty, 3));
+        return Builder.CreateSub(X3, X);
+      }
+    }
+    return nullptr;
+  }
+
+  // x - x
+  Value* createEquivalentSub(IRBuilder<>& Builder, Value* X) {
+    int choice = dist(rng);
+    Type* Ty = X->getType();
+
+    switch (choice) {
+      case 0: {
+        errs() << "x - x → 0\n";
+        return ConstantInt::get(Ty, 0);
+      }
+      case 1: {
+        errs() << "x - x → x ^ x\n";
+        return Builder.CreateXor(X, X);
+      }
+      case 2: {
+        errs() << "x - x → x + (~x + 1)\n";
+        Value* NegX = Builder.CreateAdd(Builder.CreateNot(X), ConstantInt::get(Ty, 1));
+        return Builder.CreateAdd(X, NegX);
+      }
+    }
+    return nullptr;
+  }
+
+  // x * x
+  Value* createEquivalentMul(IRBuilder<>& Builder, Value* X) {
+    int choice = dist(rng);
+    Type* Ty = X->getType();
+
+    switch (choice) {
+      case 0: {
+        errs() << "x * x → x << 1\n";
+        return Builder.CreateShl(X, ConstantInt::get(Ty, 1));
+      }
+      case 1: {
+        errs() << "x * x → x + x\n";
+        return Builder.CreateAdd(X, X);
+      }
+      case 2: {
+        errs() << "x * x → x * 2\n";
+        return Builder.CreateMul(X, ConstantInt::get(Ty, 2));
+      }
+    }
+    return nullptr;
+  }
+
+  // x / x
+  Value* createEquivalentDiv(IRBuilder<>& Builder, Value* X) {
+    int choice = dist(rng);
+    Type* Ty = X->getType();
+
+    switch (choice) {
+      case 0: {
+        errs() << "x / x → 1\n";
+        return ConstantInt::get(Ty, 1);
+      }
+      case 1: {
+        errs() << "x / x → x * (1/x)\n";
+        Value* Inv = Builder.CreateSDiv(ConstantInt::get(Ty, 1), X);
+        return Builder.CreateMul(X, Inv);
+      }
+      case 2: {
+        errs() << "x / x → x - (x - 1)\n";
+        Value* Sub = Builder.CreateSub(X, ConstantInt::get(Ty, 1));
+        return Builder.CreateSub(X, Sub);
+      }
+    }
+    return nullptr;
+  }
+
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
+    bool Modified = false;
+    IRBuilder<> Builder(F.getContext());
+
+    for (BasicBlock &BB : F) {
+      for (auto It = BB.begin(); It != BB.end(); ) {
+        Instruction &I = *It;
+        ++It;
+
+        if (auto *BinOp = dyn_cast<BinaryOperator>(&I)) {
+          Value *LHS = BinOp->getOperand(0);
+          Value *RHS = BinOp->getOperand(1);
+
+          if (!LHS->getType()->isIntegerTy()) continue;
+
+          // Match load(x) + load(x), x + x, etc.
+          Value *Base = nullptr;
+          if (LHS == RHS) {
+            Base = LHS;
+          } else {
+            auto *Load1 = dyn_cast<LoadInst>(LHS);
+            auto *Load2 = dyn_cast<LoadInst>(RHS);
+            if (Load1 && Load2 && Load1->getPointerOperand() == Load2->getPointerOperand()) {
+              Base = Load1;
+            }
+          }
+
+          if (!Base) continue;
+
+          Builder.SetInsertPoint(BinOp);
+          Value *NewVal = nullptr;
+
+          switch (BinOp->getOpcode()) {
+            case Instruction::Add:
+              NewVal = createEquivalentAdd(Builder, Base);
+              break;
+            case Instruction::Sub:
+              NewVal = createEquivalentSub(Builder, Base);
+              break;
+            case Instruction::Mul:
+              NewVal = createEquivalentMul(Builder, Base);
+              break;
+            case Instruction::SDiv:
+              NewVal = createEquivalentDiv(Builder, Base);
+              break;
+          }
+
+          if (NewVal) {
+            BinOp->replaceAllUsesWith(NewVal);
+            BinOp->eraseFromParent();
+            Modified = true;
+          }
+        }
+      }
+    }
+
+    return Modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
+  }
+};
+
+extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
+  return {
+    LLVM_PLUGIN_API_VERSION,
+    "MathObfuscator",
+    LLVM_VERSION_STRING,
+    [](::llvm::PassBuilder &PB) {
+      PB.registerPipelineParsingCallback(
+        [](::llvm::StringRef Name,
+           ::llvm::FunctionPassManager &FPM,
+           ::llvm::ArrayRef<::llvm::PassBuilder::PipelineElement>) -> bool {
+          if (Name == "math-obfuscator") {
+            FPM.addPass(MathObfuscator());
+            return true;
+          }
+          return false;
+        }
+      );
+    }
+  };
+}
